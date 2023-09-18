@@ -1,0 +1,621 @@
+/***********************************************************************
+ *
+ * PROJECT:       Raycast
+ * FILE:          render.goc
+ *
+ * AUTHOR:        Marcus Grîber
+ *
+ ***********************************************************************/
+
+//
+// Projekt Raycast-Engine
+// (C)1995 by Stefan Becker
+//
+// Render.goc
+// Haupt-Render/Zeichen-Routinen
+//
+
+//
+// Geos-Includes:
+//
+
+@include <stdapp.goh>
+
+//
+// ANSI-Includes:
+//
+
+#include    <stdio.h>
+#include    <stdlib.h>
+#include    <string.h>
+#include    <math.h>
+
+//
+// Eigene Includes:
+//
+
+@include    "raycast.goh"
+#include    "Globals.h"             // Allg. Definitionen
+
+void _pascal clear_line_low(char *p,char mask,word hoehe);
+void _pascal grey_line_low(char *p,char mask,word hoehe,word evenodd);
+void _pascal scale_line_low(char *p,char mask,char *tp,char tmask,
+  int ypos,word hoehe);
+
+//
+// Global Variablen
+//
+
+struct {
+  Bitmap bmp;
+  char data[YAUF][(XAUF+7)/8];
+} Offscreen;
+
+char texture[TEX_SIZE][(TEX_SIZE+7)/8]={
+  #include "texture\texture.inc"
+};
+
+SKIP_TAB    hsc_dx_tab,     // dx/dy-Tabellen fÅr effizienteres Raycasting
+            hsc_dy_tab;
+SKIP_TAB    vsc_dx_tab,
+            vsc_dy_tab;
+WINKEL_TAB  x_winkel_tab,   // Tabelle für Richtungsvektoren aller Winkel
+            y_winkel_tab;   // (Nîtig, um schnell einen Einheitsvektor
+                            // dieser Richtung zu ermitteln)
+
+MAZE        maze;           // Wird spÑter aus maze_user generiert.
+
+// Definition des begehbaren Areals: '*':Wand, ' ':freie FlÑche
+// Achtung, wird noch vertikal gespiegelt, damit (0,0) links unten ist
+MAZE        maze_user =
+  {
+      "****************", // 15
+      "*          *   *", // 14
+      "*    *         *", // 13
+      "*        *******", // 12
+      "*   ******     *", // 11
+      "*        *     *", // 10
+      "****     *     *", // 9
+      "*  *        *  *", // 8
+      "*  *           *", // 7
+      "*     ****  ****", // 6
+      "*  *  *        *", // 5
+      "*******   ******", // 4
+      "*  ** *        *", // 3
+      "*         *    *", // 2
+      "*  *          **", // 1 Feld (1,1) mu· frei sein (Spieler wird dahin
+      "****************"  // 0 mit Blickrichtung nach rechts positioniert!)
+  };                      // (0,0) links unten, erster Index ist X
+
+//
+// Koordinatentransformation fÅr Karten-Modus:
+//
+
+int tx(int x)           // Punkt aus virt. Welt in Kartenkoordinaten umsetzen
+{
+    int erg;
+
+    erg = (int)( (dword)x * XAUF / MAZE_MAX_X );
+    erg = MAX(0,erg);   // Legale Position (sicherheitshalber)
+    erg = MIN(XAUF-1,erg);
+    return erg;
+}
+
+int ty(int y)           // Punkt aus virt. Welt in Kartenkoordinaten umsetzen
+{
+    int erg;
+    
+    erg = (YAUF-1) - (int)( (dword)y * YAUF / MAZE_MAX_Y );
+    erg = MAX(0,erg);   // Legale Position (sicherheitshalber)
+    erg = MIN(YAUF-1,erg);
+    return erg;
+}
+
+//
+// Kartenmodus darstellen:
+//
+
+void do_map_raycasting(
+  GStateHandle window, int xw,int yw, int plx,int ply, int plw)
+{
+    int         x,y;                // x/y-Laufvariablen fÅr Felder
+    int         p1x,p1y,p2x,p2y;    // Variablen fÅr Spieler-x/y-Punkte
+    char        str[80];            // String fÅr "sprintf"
+
+    // Voreinstellungen fÅr die Grafik (Geos):
+    GrSetAreaMaskSys(window,SDM_100);
+    GrSetLineMaskSys(window,SDM_100);
+    GrSetLineStyle(window,LS_SOLID,0,NULL,0);
+    GrSetLineColor(window,CF_INDEX,C_BLACK,0,0);
+
+    // Das Labyrinth hinmalen:
+    for(x=0; x<MAZE_X; x++)         // Alle Spalten...
+        for(y=0; y<MAZE_Y; y++)     // Alle Zeilen...
+        {
+            if(maze[x][y] != ' ')   // Ist da eine Wand?
+              GrSetAreaColor(window,CF_INDEX,C_BLACK,0,0);
+            else
+              GrSetAreaColor(window,CF_INDEX,C_WHITE,0,0);
+
+            // KÑstchen zeichnen (Geos):
+            GrFillRect(window,
+                xw+tx(x*TEX_SIZE),yw+ty((y+1)*TEX_SIZE),
+                xw+tx((x+1)*TEX_SIZE),yw+ty(y*TEX_SIZE));
+        }
+
+    // Den Spieler mit einzeichnen:
+    p1x = tx(plx);                              // Aktuelle Spielerposition
+    p1y = ty(ply);
+    GrFillRect(window,xw+p1x-1,yw+p1y-1,xw+p1x+1,yw+p1y+1);
+                                                // Spieler einzeichnen
+    // Linie mit LÑnge 100 in Blickrichtung einzeichnen.
+    p2x = tx(plx + IntegerOf(GrMulWWFixed(x_winkel_tab[plw],MakeWWFixed(100))));
+    p2y = ty(ply + IntegerOf(GrMulWWFixed(y_winkel_tab[plw],MakeWWFixed(100))));
+    GrDrawLine(window,xw+p1x,yw+p1y,xw+p2x,yw+p2y);
+                                                // Linie zeichnen (Geos)
+}
+
+//
+// Eine skalierte senkrechte Texturlinie malen:
+//
+
+void draw_scaled_line(int xpos, int txt_xpos, int hoehe)
+{
+    int ypos;                           // Oberkante der zu zeichnenden Textur
+    char mask;
+
+    // Hîhe sicherheitshalber auf "vernÅnftige" Grenzen limitieren:
+    hoehe = MIN(hoehe,32000);
+    hoehe = MAX(1,hoehe);
+
+    // Texturposition sicherheitshalber auch auf "vernÅnftige" Werte limitieren:
+    txt_xpos = MAX(0,txt_xpos);
+    txt_xpos = MIN(TEX_SIZE-1,txt_xpos);
+
+    // Wo mu· die Oberkante der Linie im Grafikfenster hin? (0,0) ist links oben.
+    ypos = (YAUF/2) - (hoehe/2);        // virtueller Horizont bei YAUF/2
+
+    mask=1<<(7-(xpos%8));
+
+    if(ypos>0)                          // Draw "sky"
+      clear_line_low(&Offscreen.data[0][xpos/8], mask, ypos);
+
+    scale_line_low(
+      &Offscreen.data[MAX(0,ypos)][xpos/8], mask,
+      &texture[0][txt_xpos/8], 1<<(7-(txt_xpos%8)),
+      ypos, hoehe);                     // Draw wall
+    
+    if(ypos+hoehe<YAUF)                 // Draw "floor"
+      grey_line_low(
+        &Offscreen.data[ypos+hoehe][xpos/8], mask,
+        YAUF-(ypos+hoehe), ((ypos+hoehe)^xpos) & 1);
+}
+
+//
+// Berechnen der Entfernung mittels Streckfaktor der orthogonalen Projektion:
+//
+
+WWFixedAsDWord calc_dist(int x, int y, int plw)
+{
+    // Geht, da Richtungsvektor (x_winkel_tab,y_winkel_tab) normiert ist.
+    return GrMulWWFixed(MakeWWFixed(x),x_winkel_tab[plw]) +
+           GrMulWWFixed(MakeWWFixed(y),y_winkel_tab[plw]);
+}
+
+//
+// Ist dieser Punkt eine legale Position im Spielfeld?
+//
+
+#define legal_pos(_x,_y)\
+    ( (_x)>=0 && (_x)<MAZE_MAX_X && (_y)>=0 && (_y)<MAZE_MAX_Y )
+
+//
+// Horizontalen Scan durchfÅhren:
+//
+
+int hscan(int *lx, int *ly, int winkel)
+{
+    WWFixedAsDWord fx,fy;
+    WWFixedAsDWord   delta_x,delta_y;
+    int     iy,rx,ry;
+    int     zy;
+
+    // Ist dieser Winkel fÅr horizontales Scannen verwendbar?
+    if((hsc_dx_tab[winkel]==0) && (hsc_dy_tab[winkel]==0))
+        return FALSE;   // Nein! Illegaler Winkel => Keine Wand!
+
+    // Startposition Åbernehmen:
+    fx = MakeWWFixed(*lx); fy = MakeWWFixed(iy=*ly);
+
+    // Sehen, da· man zu Beginn auf einer horizontalen Liniengrenze landet:
+    if((iy % TEX_SIZE) != 0)
+    {
+        if((sdword)y_winkel_tab[winkel] > 0)        // Die Linie darÅber oder darunter?
+        {
+            // Wir mÅssen auf die Linie darÅber:
+            zy = ((iy / TEX_SIZE) + 1) * TEX_SIZE;  // Y-Koordinate der gewÅnschten Zeile
+        }
+        else
+        {
+            // Wir mÅssen auf die Linie darunter:
+            zy = (iy / TEX_SIZE) * TEX_SIZE;        // Y-Koordinate der gewÅnschten Zeile
+        }
+    
+        // Schritt auf die nÑchste Linie durchfÅhren:
+        delta_y = MakeWWFixed(zy - iy); // So weit ist es dahin
+        delta_x = GrMulWWFixed(
+          delta_y,
+          GrSDivWWFixed(
+            x_winkel_tab[winkel],
+            y_winkel_tab[winkel]));     // So weit zur Seite gehen.
+        fx += delta_x;                  // Da liegt der neue X-Wert
+        fy = MakeWWFixed(zy);           // Da liegt der neue Y-Wert
+    }   // if (Aufsetzen)
+
+    delta_x = hsc_dx_tab[winkel]; delta_y = hsc_dy_tab[winkel];
+
+    // Schnell scannen:
+    // So lange man sich noch in virt. Welt befindet...
+    while( legal_pos(WWFixedToInt(fx),WWFixedToInt(fy)) )
+    {
+        // In Rasterposition umrechnen.
+        rx = WWFixedToInt(fx) >> TEX_SHIFT; ry = WWFixedToInt(fy) >> TEX_SHIFT;
+
+        // Ist da etwas oberhalb und unterhalb der aktuellen hor. Linie?
+        if( (maze[rx][ry]!=' ') || (maze[rx][ry-1]!=' ') )
+        {
+            // Da ist eine Wand!
+            *lx = WWFixedToInt(fx); *ly = WWFixedToInt(fy); // Wandposition.
+            return TRUE;        // Hier ist eine Wand!
+        }   // if
+        
+        // NÑchsten Punkt holen:
+        fx += delta_x; fy += delta_y;
+    }   // while
+
+    // Keine Wand gefunden. Strahl geht ins Leere!
+    return FALSE;
+}
+
+//
+// Vertikalen Scan durchfÅhren:
+//
+
+int vscan(int *lx, int *ly, int winkel)
+{
+    WWFixedAsDWord fx,fy;
+    WWFixedAsDWord x,y,delta_x,delta_y;
+    int     ix,rx,ry;
+    int     zx;
+
+    // Ist dieser Winkel fÅr horizontales Scannen verwendbar?
+    if((vsc_dx_tab[winkel]==0) && (vsc_dy_tab[winkel]==0))
+        return FALSE;   // Nein! Illegaler Winkel => Keine Wand!
+
+    // Startposition Åbernehmen:
+    fx = MakeWWFixed(ix=*lx); fy = MakeWWFixed(*ly);
+
+    // Sehen, da· man zu Beginn auf einer vertikalen Linie landet:
+    if((ix % TEX_SIZE) != 0)
+    {
+        if((sdword)x_winkel_tab[winkel] > 0)        // Die Linie rechts oder links?
+        {
+            // Wir mÅssen auf die Linie rechts:
+            zx = ((ix / TEX_SIZE) + 1) * TEX_SIZE;  // X-Koordinate der gewÅnschten Spalte
+        }
+        else
+        {
+            // Wir mÅssen auf die Linie links:
+            zx = (ix / TEX_SIZE) * TEX_SIZE;        // X-Koordinate der gewÅnschten Spalte
+        }
+
+        // Schritt auf die nÑchste Linie durchfÅhren:
+        delta_x = MakeWWFixed(zx - ix); // So weit ist es dahin
+        delta_y = GrMulWWFixed(
+          delta_x,
+          GrSDivWWFixed(
+            y_winkel_tab[winkel],
+            x_winkel_tab[winkel]));     // So weit nach oben gehen.
+        fy += delta_y;                  // Da liegt der neue Y-Wert
+        fx = MakeWWFixed(zx);           // Da liegt der neue X-Wert
+    }   // if (Aufsetzen)
+
+    delta_x = vsc_dx_tab[winkel]; delta_y = vsc_dy_tab[winkel];
+
+    // Schnell scannen:
+    // So lange man sich noch in der vrt. Welt befindet...
+    while( legal_pos(WWFixedToInt(fx),WWFixedToInt(fy)) )
+    {                                   
+        // In Rasterposition umrechnen:
+        rx = WWFixedToInt(fx) >> TEX_SHIFT; ry = WWFixedToInt(fy) >> TEX_SHIFT;
+
+        // Ist da etwas linkt und rechts von der senkrechten Linie?
+        if( (maze[rx][ry]!=' ') || (maze[rx-1][ry]!=' ') )
+        {
+            // Ja: Eine Wand ist hier.
+            *lx = WWFixedToInt(fx); *ly = WWFixedToInt(fy); // Wandposition.
+            return TRUE;        // Hier ist eine Wand!
+        }   // if
+        
+        // NÑchsten Punkt holen:
+        fx += delta_x; fy += delta_y;
+    }   // while
+
+    // Nichts gefunden. Strahl geht ins Leere!
+    return FALSE;
+}
+
+//
+// Einen Strahl "Raycasten" und eventuellen Auftreffpunkt auf einer Mauer
+// samit zugehîriger Texturposition liefern:
+// (Arbeitet ohne Bresenham mit der Delta-X/Delta-Y-Methode fÅr max. Geschwindigkeit)
+//
+
+int cast_one_ray(int plx, int ply, int plw, int winkel, WWFixedAsDWord *dist, int *pat_pos)
+{
+    int         hwall_hit,vwall_hit;            // Horizontales bzw. vertikales Auftreffen auf Wand?
+    int         vx,vy;                          // Auftreffpunkt auf eine vertikale Linie
+    int         hx,hy;                          // Auftreffpunkt auf eine horizontale Linie
+    WWFixedAsDWord h_dist,v_dist;               // Entfernung des horizontalen und vert. Auftreffpunkts
+
+    //
+    // Horizontalen Schnellscan durchfÅhren:
+    //
+    hx = plx; hy = ply;                 // Start bei Spielerposition
+    hwall_hit = hscan(&hx,&hy,winkel);  // Treffer auf eine hor. Wand? Wenn ja: wo?
+    if(hwall_hit)
+      h_dist = calc_dist(hx-plx,hy-ply,plw);
+    else
+      h_dist = MakeWWFixed(32767);
+
+    //
+    // Vertikalen Schnellscan durchfÅhren:
+    //
+    vx = plx; vy = ply;                 // Start bei Spielerposition
+    vwall_hit = vscan(&vx,&vy,winkel);  // Treffer auf eine vert. Wand? Wenn ja: wo?
+    if(vwall_hit)
+      v_dist = calc_dist(vx-plx,vy-ply,plw);
+    else
+      v_dist = MakeWWFixed(32767);
+
+    //
+    // Gar kein Treffer?
+    //
+    if(!vwall_hit && !hwall_hit)
+        return FALSE;   // Da ist absolut garnichts!
+
+    //
+    // Zum Spieler nÑheren Treffer nehmen:
+    //
+    if(h_dist<v_dist)               // Horizontaler oder vertikaler Treffer nÑher?
+    {
+        *dist = h_dist;             // horizontal war nÑher
+        *pat_pos = hx % TEX_SIZE;   // Diese Texturspalte wird genommen.
+    }
+    else
+    {
+        *dist = v_dist;             // vertikal war nÑher
+        *pat_pos = vy % TEX_SIZE;
+                                    // Diese Texturspalte wird genommen.
+    }
+    return TRUE;        // Treffer. NÑherer der beiden Schnittpunkte.
+}
+
+//
+// Hîhe eines Objekts aus seiner Entfernung berechnen.
+// (Wird mit Konstante/Entfernung berechnet.)
+//
+
+int calc_hoehe(int dist)
+{
+    // Hîhe berechnen:
+    dist = ABS(dist);                   // sicherheitshalber!!!
+    dist = MIN(dist,MAX_SICHT);         // sicherheitshalber!!!
+    return PERSPEKTIVE / (dist+1);      // Zurodnung Entfernung->Wandhîhe
+}
+
+//
+// Haupt-Raycast-Routine (3D-Modus):
+//
+
+void do_3d_raycasting(int plx, int ply, int plw)
+{
+    int             wall_x,wall_y;                  // Schnittpunkt mit der Wand
+    int             x,winkel,startw,endw;           // Laufvariable, Start-, Endwinkel
+    WWFixedAsDWord  dist;                           // Distanz der Wand.
+    int             hoehe;                          // Daraus errechnete Hîhe der darzustellenden Wand in Pixeln
+    int             txt_pos;                        // Zu skalierende Spalte der Textur.
+    char            str[80];                        // String fÅr Koordinaten-Ausgabe.
+
+    // Start- und Endwinkel fÅr Spieler-Blickwinkel errechnen:
+    startw = plw + (XAUF / 2);              // Start-Blickwinkel errechnen
+    if(startw >= ANZ_WINKEL)                // Legal?
+        startw -= ANZ_WINKEL;               // Nein, mu· "modulo" korrigiert werden.
+    if(startw < 0)                          // Legal?
+        startw += ANZ_WINKEL;               // Nein, mu· "modulo" korrigiert werden.
+
+    // Raycasting fÅr alle Winkel durchfÅhren:
+    x = 0;                                  // Dieser Strahl gehîrt zur X-Koordinate 0 im generierten Bild
+    winkel = startw;                        // Mit dem Startwinkel wird links angefangen
+    while(x < XAUF)                         // So lange bis das gesamte Bild berechnet ist
+    {
+        // Einen Strahl absetzen und ggf. Mauerschnittpunkte ermitteln:
+        if(cast_one_ray(plx,ply,plw,winkel,&dist,&txt_pos))
+        {
+            // Ja, da ist eine Wand. Aus der Entfernung
+            // berechnen, wie gro· diese dargestellt werden soll:
+            hoehe = calc_hoehe(WWFixedToInt(dist));
+                                            // Wie hoch mu· das Objekt nun sein?
+
+            // Skalierte Texturspalte senkrecht zeichnen:
+            draw_scaled_line(x,txt_pos,hoehe);
+        }
+
+        // Schleifenende: (Hier mu· x inkrementiert und der Winkel "modulo" erhîht werden)
+        x++;                                // NÑchste X-Koordinate
+        winkel--;                           // NÑchster Winkel
+        if(winkel < 0)                      // Illegal bzw. Unterlauf?
+            winkel += ANZ_WINKEL;           // Korrigieren!
+    }   // while
+}
+
+//
+// Routine verzweigt je nach Flagge "my_3d_flag" auf Karten- oder
+// 3D-Modus und leitet Zeichenoperationen in eine Offscreen-Bitmap um.
+// (Mac-spezifisch)
+//
+
+void do_raycasting(
+  GStateHandle window, int x,int y, int plx,int ply, int plw, Boolean DrawMap)
+{
+    // 3D- oder Kartensicht?
+    if(DrawMap)
+        do_map_raycasting(window,x,y,plx,ply,plw);      // Karten-Sicht
+    else
+    {
+        do_3d_raycasting(plx,ply,plw);                  // 3D-Sicht
+        GrDrawImage(window,x,y,IBS_1,&Offscreen.bmp);   // Offscreen-Bitmap
+    }
+}
+
+//
+// Tabellen initialisieren etc. (fÅr alle Rechnersysteme):
+//
+
+// Spielfeld vertikal spiegeln. Nîtig, damit vorinitialisiertes
+// Feld oben "richtig herum" im Quellcode angezeigt wird.
+
+void flip_maze(void)
+{                       
+    int     zeile,spalte;               // Indizes
+
+    for(spalte=0; spalte<MAZE_X; spalte++)
+        for(zeile=0; zeile<MAZE_Y; zeile++)
+            maze[spalte][zeile] = maze_user[MAZE_Y-1-zeile][spalte];
+                                        // Daten Åbernehmen
+}
+
+void Init_Tabellen(void)        // dx/dy-Tabelle und Winkeltabellen errechnen:
+{
+
+    WWFixedAsDWord z,d,alpha,d_alpha;
+    int         i;              // Laufvariable
+
+    //
+    // Tabelle fÅr Richtungsvektoren initialisieren:
+    //
+
+    // Grî·e eines Winkelschrittes berechnen (360/Winkelanzahl):
+    d_alpha = GrSDivWWFixed(MakeWWFixed(360),MakeWWFixed(ANZ_WINKEL));
+
+    // Für alle Winkel den zugehîrigen Richtungsvektor errechnen.
+    // Dabei ist der 0. Winkel bei 0 Grad (entspricht rechts).
+    for(alpha=0, i=0; i<ANZ_WINKEL; i++, alpha+=d_alpha)  // Alle Winkel...
+    {
+        // Punkte auf dem Einheitskreis als Richtungsvektoren:
+        x_winkel_tab[i] = GrQuickCosine(alpha);
+                                        // Cos gibt die X-Koordinate an
+        y_winkel_tab[i] = GrQuickSine(alpha);
+                                        // Sin gibt die Y-Koordinate an
+    }   // for
+
+    //
+    // Tabelle für schnelleres dx/dy-Raycasting initialisieren:
+    //
+    for(i=0; i<ANZ_WINKEL; i++) // Alle Winkel...
+    {
+        //
+        // Tabelle für horizontalen Scan generieren:
+        //
+        if(y_winkel_tab[i]==0)                      // Degenerierte Richtung für hor. Scan?
+            hsc_dx_tab[i] = hsc_dy_tab[i] = 0;      // "Degenerierte" Richtung für hor. Scan!
+        else
+        {
+            hsc_dy_tab[i] =
+              MakeWWFixed( ((sdword)y_winkel_tab[i]>0)? TEX_SIZE : -TEX_SIZE );
+            d = GrMulWWFixed(
+              hsc_dy_tab[i],
+              GrSDivWWFixed(
+                x_winkel_tab[i],
+                y_winkel_tab[i]));
+            if(ABS(WWFixedToInt(d))>MAX_SICHT)
+                hsc_dx_tab[i] = hsc_dy_tab[i] = 0;  // Dieser Winkel ist auch "degeneriert"!
+            else
+                hsc_dx_tab[i] = d;                  // Dieser Wert kann verwendet werden.
+        }
+        //
+        // Tabelle für vertikalen Scan erstellen:
+        //
+        if(x_winkel_tab[i]==0)                      // Degenerierte Richtung für vert. Scan?
+            vsc_dx_tab[i] = vsc_dy_tab[i] = 0;      // "Degenerierte" Richtung für vert. Scan!
+        else
+        {
+            vsc_dx_tab[i] =
+              MakeWWFixed( ((sdword)x_winkel_tab[i]>0)? TEX_SIZE : -TEX_SIZE );
+            d = GrMulWWFixed(
+              vsc_dx_tab[i],
+              GrSDivWWFixed(
+                y_winkel_tab[i],
+                x_winkel_tab[i]));
+            if(ABS(WWFixedToInt(d))>MAX_SICHT)
+                vsc_dx_tab[i] = vsc_dy_tab[i] = 0;  // Dieser Winkel ist auch "degeneriert"!
+            else
+                vsc_dy_tab[i] = d;                  // Dieser Wert kann verwendet werden.
+        }
+    }   // for
+
+    //
+    // Spielfeld vertikal spiegeln:
+    //
+    flip_maze();
+}
+
+/***********************************************************************
+ *              Methods for RaycastClass
+ ***********************************************************************/
+@classdecl      RaycastClass;
+
+@method RaycastClass, MSG_VIS_RECALC_SIZE
+{
+    return MAKE_SIZE_DWORD(XAUF,YAUF);
+}
+
+@method RaycastClass, MSG_VIS_DRAW
+{
+    VisInstance *vself;
+
+    vself = ObjDerefVis(oself);
+    do_raycasting(
+      gstate, vself->VI_bounds.R_left, vself->VI_bounds.R_top,
+      pself->RCI_plx, pself->RCI_ply, pself->RCI_plw, pself->RCI_drawMap);
+}
+
+@method RaycastClass, MSG_RAYCAST_INIT_TABLES
+{
+    Init_Tabellen();
+    Offscreen.bmp.B_width=XAUF;
+    Offscreen.bmp.B_height=YAUF;
+    Offscreen.bmp.B_compact=BMC_UNCOMPACTED;
+    Offscreen.bmp.B_type=BMF_MONO;
+}
+
+@method RaycastClass, MSG_RAYCAST_SET_MAP_MODE
+{
+    pself->RCI_drawMap = drawMap;       // Set new mapping mode and redraw
+    @send self::MSG_VIS_REDRAW_ENTIRE_OBJECT();
+}
+
+@method RaycastClass, MSG_RAYCAST_GET_PLAYER
+{
+    *plx = pself->RCI_plx;              // Return player coordinates
+    *ply = pself->RCI_ply;
+    *plw = pself->RCI_plw;
+}
+
+@method RaycastClass, MSG_RAYCAST_SET_PLAYER
+{
+    pself->RCI_plx = plx;               // Set new player coordinates & redraw
+    pself->RCI_ply = ply;
+    pself->RCI_plw = plw;
+    @send self::MSG_VIS_REDRAW_ENTIRE_OBJECT();
+}

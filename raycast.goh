@@ -1,0 +1,23 @@
+/***********************************************************************
+ *
+ *	Copyright (c) Geoworks 1991-92 -- All Rights Reserved
+ *
+ * PROJECT:       Raycast
+ * FILE:          raycast.goh
+ *
+ * AUTHOR:        Marcus Gr”ber
+ *
+ ***********************************************************************/
+
+@class RaycastClass, GenGadgetClass;
+  @instance Boolean RCI_drawMap;
+  @instance sword RCI_plx;
+  @instance sword RCI_ply;
+  @instance sword RCI_plw;
+
+  @message void MSG_RAYCAST_INIT_TABLES();
+  @message void MSG_RAYCAST_SET_PLAYER(sword plx,sword ply,sword plw);
+  @message void MSG_RAYCAST_GET_PLAYER(sword *plx,sword *ply,sword *plw);
+  @message void MSG_RAYCAST_SET_MAP_MODE(Boolean drawMap);
+@endc
+

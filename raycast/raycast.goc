@@ -1,0 +1,232 @@
+/***********************************************************************
+ *
+ * PROJECT:       Raycast
+ * FILE:          raycast.goc
+ *
+ * AUTHOR:        Marcus Gr”ber
+ *
+ ***********************************************************************/
+
+/*
+ ***************************************************************************
+ *		Include files
+ ***************************************************************************
+ */
+
+@include <stdapp.goh>
+#include <math.h>
+#include <stdio.h>
+
+@include "raycast.goh"
+#include "globals.h"
+
+
+/*
+ ***************************************************************************
+ *		Class & Message Definitions
+ ***************************************************************************
+ */
+
+@class  RaycastProcessClass, GenProcessClass;
+  @message void MSG_RAY_PROCESS_GO();
+  @message void MSG_RAY_PROCESS_LEFT();
+  @message void MSG_RAY_PROCESS_RIGHT();
+  @message void MSG_RAY_PROCESS_LOOK();
+  @message (GEN_BOOLEAN_GROUP_APPLY_MSG) MSG_RAY_PROCESS_ONOFF_CHANGED;
+@endc   /* end of class definition */
+
+@classdecl      RaycastProcessClass, neverSaved;
+
+/*
+ ***************************************************************************
+ *		UI Objects
+ ***************************************************************************
+ */
+
+#define OPTION_DRAW_MAP 0x0001
+
+/*
+ *		Application Object
+ */
+
+@start	AppResource;
+
+@object GenApplicationClass RaycastApp = {
+
+    GI_visMoniker = list { @RaycastTextMoniker, @Moniker0, @Moniker1 }
+
+    GI_comp = @RaycastPrimary;
+
+    gcnList(MANUFACTURER_ID_GEOWORKS,GAGCNLT_WINDOWS) = @RaycastPrimary;
+}
+
+@visMoniker RaycastTextMoniker = "Raycasting Demo";
+
+@include "art\appicon.goh"
+
+@end	AppResource;
+
+/*
+ *              Interface Objects
+ */
+
+@start  Interface;              /* this resource is for misc UI objects */
+
+@object GenPrimaryClass RaycastPrimary  = {
+    GI_comp = @RaycastLook,
+              @LeftTrigger,@GoTrigger,@RightTrigger,@OptionsMenu
+@ifdef DO_ERROR_CHECKING
+    ,@RedrawTime
+@endif
+    ;
+    HINT_SIZE_WINDOW_AS_DESIRED;
+    HINT_DISPLAY_NOT_RESIZABLE;
+}
+
+@object RaycastClass RaycastLook = {
+    RCI_plx = 192;
+    RCI_ply = 192;
+    RCI_plw = 0;
+    RCI_drawMap = FALSE;
+}
+
+@object GenInteractionClass OptionsMenu = {
+    GI_visMoniker = "?";
+    GI_comp = @OnOffOptions,@LookTrigger;
+    GII_visibility = GIV_POPUP;
+    HINT_SEEK_SLOT = 4;
+}
+
+@object GenBooleanGroupClass OnOffOptions = {
+    GI_comp = @OptionDrawMap;
+    GBGI_destination = process;
+    GBGI_applyMsg = MSG_RAY_PROCESS_ONOFF_CHANGED;
+    GBGI_selectedBooleans = 0;
+}
+
+@object GenBooleanClass OptionDrawMap = {
+    GI_visMoniker = 'M',"Draw Map";
+    GBI_identifier = OPTION_DRAW_MAP;
+}
+
+@object GenTriggerClass LeftTrigger = {
+    GI_visMoniker = "Left";
+    GTI_actionMsg = MSG_RAY_PROCESS_LEFT;
+    GTI_destination = process;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 0;
+}
+@object GenTriggerClass GoTrigger = {
+    GI_visMoniker = "Go";
+    GTI_actionMsg = MSG_RAY_PROCESS_GO;
+    GTI_destination = process;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 1;
+}
+@object GenTriggerClass RightTrigger = {
+    GI_visMoniker = "Right";
+    GTI_actionMsg = MSG_RAY_PROCESS_RIGHT;
+    GTI_destination = process;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 2;
+}
+@object GenTriggerClass LookTrigger = {
+    GI_visMoniker = "Look";
+    GTI_actionMsg = MSG_RAY_PROCESS_LOOK;
+    GTI_destination = process;
+}
+
+@ifdef DO_ERROR_CHECKING
+@object GenGlyphClass RedrawTime = {
+    GI_visMoniker = "";
+}
+@endif
+
+@end Interface;
+
+/*
+ ***************************************************************************
+ *                     Code for RaycastProcessClass
+ ***************************************************************************
+ */
+@method RaycastProcessClass, MSG_GEN_PROCESS_OPEN_APPLICATION
+{
+    @callsuper();
+    @send RaycastLook::MSG_RAYCAST_INIT_TABLES();
+                                        /* set up tables for Raycast object */
+    @call RaycastApp::MSG_GEN_APPLICATION_INSTALL_TOKEN();
+                                        /* install token if not already there */
+}
+
+@method RaycastProcessClass, MSG_RAY_PROCESS_GO
+{
+    sword plx,ply,plw;
+
+    @call RaycastLook::MSG_RAYCAST_GET_PLAYER(&plx,&ply,&plw);
+
+    plx += IntegerOf(GrMulWWFixed(x_winkel_tab[plw],MakeWWFixed(50)));
+    ply += IntegerOf(GrMulWWFixed(y_winkel_tab[plw],MakeWWFixed(50)));
+
+    if( maze[plx>>TEX_SHIFT][ply>>TEX_SHIFT]==' ' )
+      @send RaycastLook::MSG_RAYCAST_SET_PLAYER(plx,ply,plw);
+}
+
+@method RaycastProcessClass, MSG_RAY_PROCESS_LEFT
+{
+    sword plx,ply,plw;
+
+    @call RaycastLook::MSG_RAYCAST_GET_PLAYER(&plx,&ply,&plw);
+
+    plw+=(ANZ_WINKEL/32);
+    if(plw>=ANZ_WINKEL)
+      plw-=ANZ_WINKEL;
+
+    @send RaycastLook::MSG_RAYCAST_SET_PLAYER(plx,ply,plw);
+}
+
+@method RaycastProcessClass, MSG_RAY_PROCESS_RIGHT
+{
+    sword plx,ply,plw;
+
+    @call RaycastLook::MSG_RAYCAST_GET_PLAYER(&plx,&ply,&plw);
+
+    plw-=(ANZ_WINKEL/32);
+    if(plw<0)
+      plw+=ANZ_WINKEL;
+
+    @send RaycastLook::MSG_RAYCAST_SET_PLAYER(plx,ply,plw);
+}
+
+@method RaycastProcessClass, MSG_RAY_PROCESS_ONOFF_CHANGED
+{
+    @send RaycastLook::MSG_RAYCAST_SET_MAP_MODE(
+      (selectedBooleans & OPTION_DRAW_MAP)?TRUE:FALSE);
+}
+
+@method RaycastProcessClass, MSG_RAY_PROCESS_LOOK
+{
+@ifdef DO_ERROR_CHECKING
+    dword time1,time2;
+    char buf[80];
+@endif
+    sword plx,ply,plw;
+    int i;
+
+    @call RaycastLook::MSG_RAYCAST_GET_PLAYER(&plx,&ply,&plw);
+
+@ifdef DO_ERROR_CHECKING
+    time1=TimerGetCount();
+@endif
+    for(i=0; i<32; i++)
+    {
+      plw+=(ANZ_WINKEL/32);
+      if(plw>=ANZ_WINKEL)
+        plw-=ANZ_WINKEL;
+      @call RaycastLook::MSG_RAYCAST_SET_PLAYER(plx,ply,plw);
+    }
+@ifdef DO_ERROR_CHECKING
+    time2=TimerGetCount();
+    sprintf(buf,"Time to redraw: %5ld ms",(time2-time1)*17/32);
+    @call RedrawTime::MSG_GEN_REPLACE_VIS_MONIKER_TEXT(buf,VUM_NOW);
+@endif
+}
